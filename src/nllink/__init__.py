@@ -31,6 +31,7 @@ from pathlib import Path
 import asyncio
 from asyncio import gather
 import asyncio
+from collections import defaultdict
 from logzero import logger as log
 sys.modules["asyncio.coroutine"] = asyncio
 import pydle
@@ -38,6 +39,7 @@ import pydle
 
 NAME_DIGITS = 5
 MAX_DEPTH = 5
+DEFAULT_CHANNEL = "#export_bots"
 
 
 # monkeypatch pydle
@@ -179,7 +181,7 @@ class IRCExportBot(pydle.Client):
         self.pool.connect(new_elf, self.connection.hostname, port=self.connection.port, tls=False, tls_verify=False)
         event_loop.create_task(new_elf.connect(self.connection.hostname, port=self.connection.port, tls=False, tls_verify=False))
     
-    def try_instantiate(self, reply_target, source, invited_to):
+    async def try_instantiate(self, reply_target, source, invited_to):
         obj_cls = self.class_  
         sig = inspect.signature(obj_cls.__init__)
         kwargs = {}
@@ -196,6 +198,8 @@ class IRCExportBot(pydle.Client):
         if self.instantiator is not None:
             try:
                 self.obj = self.instantiator()
+                log.debug(f"Instantiated {self.nickname} with instantiator function.")
+                await self.join_supplemental_channels()
                 return True
             except:
                 log.error("Instantiator failed to instantiate object with provided instantiator function.")
@@ -203,11 +207,35 @@ class IRCExportBot(pydle.Client):
         elif len(set(sig.parameters) - {'args', 'kwargs', 'self'}) == 0:
             try:
                 self.obj = obj_cls(**kwargs)
+                log.debug(f"Instantiated {self.nickname} with {kwargs}")
+                await self.join_supplemental_channels()
                 return True
             except:
                 log.error("Instantiator failed to instantiate object with no arguments.")
                 return False
         return False  # can't instantiate without arguments
+    
+    async def join_supplemental_channels(self):
+        # for every method in self.obj,
+        for method_name in dir(self.obj):
+            method = getattr(self.obj, method_name)
+            if not callable(method): continue
+            if method_name.startswith("_"): continue
+            log.debug(f"Exporting method {method_name}")
+            if method_name in self.class_._export_metadata:
+                if "channel" in self.class_._export_metadata[method_name]:
+                    for chan in self.class_._export_metadata[method_name]["channel"]:
+                        if chan not in self.joined_channels:
+                            log.info(f"Joining supplemental channel {chan}")
+                            self.joined_channels.append(chan)
+                            await self.join(chan)
+                if "channel_suffix" in self.class_._export_metadata[method_name]:
+                    for chan_sfx in self.class_._export_metadata[method_name]["channel_suffix"]:
+                        chan = self.joined_channels[0] + chan_sfx
+                        if chan not in self.joined_channels:
+                            log.info(f"Joining supplemental channel {chan}")
+                            self.joined_channels.append(chan)
+                            await self.join(chan)
     
     def instantiation_instructions(self):
         """Return instructions for instantiating this bot's class."""
@@ -254,11 +282,14 @@ class IRCExportBot(pydle.Client):
             # self.user_full_name = info["realname"]
             await self.part(self.chan_free, "Hooray! I was chosen!")
             self.replace_free_self_if_needed()
+        if len(self.joined_channels) > 0:
+            await self.message(by, f"I'm already in a channel {self.joined_channels}, please join me there!")
+            return
         await self.join(channel)
         if channel not in self.joined_channels: 
             self.joined_channels.append(channel)
         if self.obj is None:
-            if not self.try_instantiate(reply_target=by, source=by, invited_to=channel):
+            if not await self.try_instantiate(reply_target=by, source=by, invited_to=channel):
                 await self.message(channel, self.instantiation_instructions())
         self.save_me()
 
@@ -479,6 +510,19 @@ class IRCExportBot(pydle.Client):
             except Exception as e:
                 log.error(f"{self.nickname} >>> ERROR SAVING SELF TO {full_save_path}: {e}")
     
+    def remove_me(self):
+        if self.save_path is not None:
+            full_save_path = os.path.join(self.save_path, f'{self.nickname}.pickle')
+            log.debug(f"{self.nickname} >>> REMOVING SELF FROM {full_save_path}")
+            try:
+                os.remove(full_save_path)
+            except Exception as e:
+                log.error(f"{self.nickname} >>> ERROR REMOVING SELF FROM {full_save_path}: {e}")
+    
+    def is_superuser(self, source_user, source_channel=None):
+        # TODO: check if he's op on the channel with originating message
+        return source_user == self.assigned_user
+    
     async def think(self, message, reply_target, source):
         # parse message in format "function_name(arg1, arg2, arg3)"
         # check if format is correct with regex
@@ -489,9 +533,27 @@ class IRCExportBot(pydle.Client):
         try:
             if match is not None and len(match.groups()) == 2:
                 func_name = match[1]
+                if func_name == "destroy" and self.is_superuser(source, source_channel=reply_target):
+                    log.info(f"Destroying bot {self.nickname} by request from {source}")
+                    await self.message(reply_target, f"Destroying bot {self.nickname} by request from {source}")
+                    for channel in self.joined_channels:
+                        try:
+                            await self.part(channel)
+                        except:
+                            pass
+                    self.joined_channels = []
+                    self.pool.bot_instances.remove(self)
+                    self.pool = None
+                    self.remove_me()
+                    return None
                 s_args = match[2]
+                if not self.check_reply_channel(func_name, reply_target):
+                    log.info(f"Reply channel not allowed for function: {func_name}")
+                    await self.message(reply_target, f"The function {func_name} is not allowed to reply to channel {reply_target}. It is available on channels: {self.list_exported_channels(func_name)}")
+                    return
+
                 if func_name != self.class_.__name__ and self.obj is None:
-                    if not self.try_instantiate(reply_target=reply_target, source=source, invited_to=self.joined_channels):
+                    if not await self.try_instantiate(reply_target=reply_target, source=source, invited_to=self.joined_channels):
                         await self.message(reply_target, self.instantiation_instructions())
                         return
                 try:
@@ -521,6 +583,9 @@ class IRCExportBot(pydle.Client):
                         try:
                             result = func(*args, **kwargs)
                             if func_name == self.class_.__name__:
+                                log.debug("Instantiated successfully")
+                                self.obj = result
+                                await self.join_supplemental_channels()
                                 self.save_me()
                                 return f"TO:{reply_target} {self.instantiation_success_message()}"
                             if result is None: return None
@@ -559,18 +624,22 @@ class IRCExportBot(pydle.Client):
         log.info(f"THINK - INCORRECT CALL: {message}, returning docs")
         if self.obj is None:
             log.info(f"THINK - NOT INSTANTIATED: {message}, trying to instantiate")
-            if not self.try_instantiate(reply_target=reply_target, source=source, invited_to=self.joined_channels):
+            if not await self.try_instantiate(reply_target=reply_target, source=source, invited_to=self.joined_channels):
                 await self.message(reply_target, self.instantiation_instructions())
                 return
         # prepare a full description of the object
-        doc = self.get_documantation(preface=usage_error_message)
+        if reply_target.startswith("#"):
+            channel = reply_target
+        else:
+            channel = None
+        doc = self.get_documentation(preface=usage_error_message, channel=channel)
         return f"TO:{reply_target} {doc}"
     
     def instantiation_success_message(self):
-        doc = self.get_documantation(preface="Successfully instantiated! Now you can use the bot according to the following documentation:\n")
+        doc = self.get_documentation(preface="Successfully instantiated! Now you can use the bot according to the following documentation:\n")
         return doc
     
-    def get_documantation(self, preface=""):
+    def get_documentation(self, preface="", channel=None):
         obj_class_docstring = self.obj.__doc__ or "Should be self-explanatory"
         # list all methods of object and their docstrings
         all_methods_docstrings = []
@@ -579,25 +648,60 @@ class IRCExportBot(pydle.Client):
                 continue
             method = getattr(self.obj, method_name)
             if callable(method):
+                if channel is not None and not self.check_reply_channel(method_name, channel):
+                    log.debug(f"Skipping method {method_name} because it is not exported to channel {channel}")
+                    continue
+                log.debug("Found method: " + method_name)
                 method_docstring = method.__doc__ or "Should be self-explanatory"
                 # get method signature
                 method_signature = inspect.signature(method)
-                all_methods_docstrings.append(f"Method '{method_name}{method_signature}': {method_docstring}")
-        
-        doc = f"{preface} In order to provide the correct request you must send the message exactly in the format of '<method_name>(<argument1>, <argument2>, ...)'. Arguments must be in Python or JSON format, and available methods and documentation are:\n# {self.class_.__name__}\n {obj_class_docstring}\n\nMethods:\n" + "\n".join(all_methods_docstrings)
-        return doc
+                chans_avail_list = ", ".join(self.func_chan_avail(method_name))
+                all_methods_docstrings.append(f"Method '{method_name}{method_signature} (available on channels: {chans_avail_list})': {method_docstring}")
 
+        all_methods_docstrings.append(f"Method 'destroy()': Delete and unload this bot.")
+        
+        doc = f"{preface} In order to provide the correct request you must send the message exactly in the format of '<method_name>(<argument1>, <argument2>, ...)'. Arguments must be in Python or JSON format, and available methods and documentation are:\n# {self.class_.__name__}\n {obj_class_docstring}\n\nMethods:\n" + "\n".join(all_methods_docstrings) + "\nThis bot has potentially other methods available on channels: " + ", ".join(self.joined_channels)
+        return doc
     
+    def check_reply_channel(self, method_name, channel):
+        allowed_channels = self.list_exported_channels(method_name)
+        if len(allowed_channels) == 0:
+            return True
+        if channel in allowed_channels:
+            return True
+        return False 
+    
+    def list_exported_channels(self, method_name):
+        if method_name in self.class_._export_metadata:
+            chans_base = self.class_._export_metadata[method_name]["channels"]
+            if len(self.joined_channels) > 0:
+                chans_sup = [self.joined_channels[0] + x for x in self.class_._export_metadata[method_name]["channel_suffix"]]
+            return chans_base + chans_sup
+        else:
+            return self.joined_channels[:1]
+    
+    def func_chan_avail(self, func_name):
+        """Return the list of channels where the function is available."""
+        if func_name in self.class_._export_metadata:
+            chans_base = self.class_._export_metadata[func_name]["channels"]
+            if len(self.joined_channels) > 0:
+                chans_sup = [self.joined_channels[0] + x for x in self.class_._export_metadata[func_name]["channel_suffix"]]
+            return chans_base + chans_sup
+        else:
+            return self.joined_channels[:1]
+
 
 # TODO: object-oriented interface to have more control over the export runtimes
-def export(obj_or_class, server_address="irc.magic-r.com", server_port=3389, channel="#export_bots", nickname_base=None, use_tls=False, tls_verify=False, base_path=None, full_storage_path=None, blocking=True):
+def export(obj_or_class_or_method, server_address="irc.magic-r.com", server_port=3389, channel=DEFAULT_CHANNEL, channel_suffix="", nickname_base=None, use_tls=False, tls_verify=False, base_path=None, full_storage_path=None, blocking=True):
+    # TODO: bot can only join one main channel, subsequent invites must fail
     """Superfunction to export an object to IRC as a bot in Magic-R natural language format.
 
     Args:
-        obj_or_class (any object or class): object or class to export. The class must contain docstrings for all methods and attributes, including __init__. It must be picklable. The explanations must be as thorough and as grounded as possible, as they will be used to generate the natural language interface.
+        obj_or_class_or_method (any object or class or method): object or class or method to export. The class must contain docstrings for all methods and attributes, including __init__. It must be picklable. The explanations must be as thorough and as grounded as possible, as they will be used to generate the natural language interface. If class method is supplied - it will be used to set attributes of the method, like channel_suffix or channel. If class is supplied - it will be instantiated with the default __init__ method. If object is supplied - it will be used as-is.
         server_address (str, optional): IRC server address. Defaults to "irc.magic-r.com".
         server_port (int, optional): IRC server port. Defaults to 3389.
         channel (str, optional): IRC channel to put "free" bots to. Defaults to "#export_bots".
+        channel_suffix (str, optional): Suffix to add to the channel name when exporting specific function. Defaults to "".
         nickname_base (str, optional): Base for the bot nicknames + 0001, ..2, ... Defaults to object's class name lowercase.
         use_tls (bool, optional): Use TLS for server connection or not. Defaults to False.
         tls_verify (bool, optional): Use TLS cert verification or not. Defaults to False.
@@ -608,10 +712,36 @@ def export(obj_or_class, server_address="irc.magic-r.com", server_port=3389, cha
         ClientPool, Tuple[List[bot_instances], thread]: ClientPool with eventloop, List of bot instances and a thread that runs the IRC event loop. 
     """    
 
-    if isinstance(obj_or_class, type):
-        cls_name = obj_or_class.__name__
-    else:
-        cls_name = obj_or_class.__class__.__name__
+    if channel and not channel.startswith("#"):
+        channel = "#" + channel
+
+    # explore 3 options: class, classmethod, object
+    if isinstance(obj_or_class_or_method, type):
+        cls = obj_or_class_or_method
+        cls_name = obj_or_class_or_method.__name__
+        method  = None
+    elif callable(obj_or_class_or_method) and not isinstance(obj_or_class_or_method, type):
+        # this is class un-bound method, need to extract class that this method belongs to
+        # since it doesn't have __self__ yet, we use different method:
+        cls = inspect._findclass(obj_or_class_or_method)
+        cls_name = cls.__name__
+        method = obj_or_class_or_method
+    elif isinstance(obj_or_class_or_method, object):
+        cls = obj_or_class_or_method.__class__
+        cls_name = cls.__name__
+        method = None
+
+    if not hasattr(cls, "_export_metadata"):
+        cls._export_metadata = defaultdict(lambda: defaultdict(list))
+
+    if callable(obj_or_class_or_method) and not isinstance(obj_or_class_or_method, type):
+        # just set the metadata and return (if blocking=False) - TODO: this is the only supported mode as of yet
+        if channel != DEFAULT_CHANNEL:
+            cls._export_metadata[obj_or_class_or_method.__name__]["channel"].append(channel)
+        if channel_suffix != "":
+            cls._export_metadata[obj_or_class_or_method.__name__]["channel_suffix"].append(channel_suffix)
+        return
+
     base_path = base_path or f"./nllink.data"
     full_path = full_storage_path or str(os.path.join(base_path, cls_name))
     Path(full_path).mkdir(parents=True, exist_ok=True)
@@ -645,7 +775,7 @@ def export(obj_or_class, server_address="irc.magic-r.com", server_port=3389, cha
         _ = str(_).zfill(5)
         new_bot_name = f"{nickname_base}{_}"
         new_bot_real_name = f"{cls_name} {_}"
-        bot_new_client = IRCExportBot(new_bot_name, obj=obj_or_class, chan_free=channel, realname=new_bot_real_name)
+        bot_new_client = IRCExportBot(new_bot_name, obj=obj_or_class_or_method, chan_free=channel, realname=new_bot_real_name)
         bot_instances.append(bot_new_client)
 
     bot: IRCExportBot
