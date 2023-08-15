@@ -128,6 +128,7 @@ class IRCExportBot(pydle.Client):
         """Called after initialization."""
         self.real_name = self.nickname
         self.real_name_temp = self.nickname
+        self.tasks = []
 
     async def on_connect(self):
         self.RECONNECT_MAX_ATTEMPTS = None
@@ -139,6 +140,9 @@ class IRCExportBot(pydle.Client):
         else:
             for channel in self.joined_channels:
                 await self.join(channel)
+            if self.obj is not None and len(self.joined_channels) > 0:
+                # restore any infinite loops
+                await self.join_supplemental_channels()
     
     def __getstate__(self):
         return [None, self.assigned_user, None, None, self.joined_channels, self.nickname, self.log_lines, self.realname, self.chan_free, self.obj, self.class_, self.invited_channels]
@@ -186,6 +190,18 @@ class IRCExportBot(pydle.Client):
         self.pool.connect(new_elf, self.connection.hostname, port=self.connection.port, tls=False, tls_verify=False)
         event_loop.create_task(new_elf.connect(self.connection.hostname, port=self.connection.port, tls=False, tls_verify=False))
     
+    def fill_kwargs(self, parameters, kwargs, reply_target, source, invited_to):
+        if "nickname" in parameters:
+            kwargs["nickname"] = self.nickname
+        if "assigned_user" in parameters:
+            kwargs["assigned_user"] = self.assigned_user
+        if "target" in parameters:
+            kwargs["target"] = reply_target
+        if "source" in parameters:
+            kwargs["source"] = source
+        if "invited_to" in parameters:
+            kwargs["invited_to"] = self.joined_channels + [invited_to]
+
     async def try_instantiate(self, reply_target, source, invited_to):
         obj_cls = self.class_  
         sig = inspect.signature(obj_cls.__init__)
@@ -227,6 +243,7 @@ class IRCExportBot(pydle.Client):
             if not callable(method): continue
             if method_name.startswith("_"): continue
             log.debug(f"Exporting method {method_name}")
+            invited_to = self.joined_channels.copy()
             if method_name in self.class_._export_metadata:
                 if "channel" in self.class_._export_metadata[method_name]:
                     for chan in self.class_._export_metadata[method_name]["channel"]:
@@ -234,6 +251,7 @@ class IRCExportBot(pydle.Client):
                             log.info(f"Joining supplemental channel {chan}")
                             self.joined_channels.append(chan)
                             await self.join(chan)
+                        invited_to.append(chan)
                 if "channel_suffix" in self.class_._export_metadata[method_name]:
                     for chan_sfx in self.class_._export_metadata[method_name]["channel_suffix"]:
                         chan = self.invited_channels[0] + chan_sfx
@@ -241,13 +259,19 @@ class IRCExportBot(pydle.Client):
                             log.info(f"Joining supplemental channel {chan}")
                             self.joined_channels.append(chan)
                             await self.join(chan)
-    
-    def instantiation_instructions(self):
-        """Return instructions for instantiating this bot's class."""
-        PREFACE = "This bot uses an object-oriented interface with a class that must be instantiated with additional arguments before use. See below for instructions on how to do so."
-        obj_cls = self.class_
-        sig = inspect.signature(obj_cls.__init__)
-        params = list(sig.parameters.keys())
+                        invited_to.append(chan)
+            if inspect.iscoroutinefunction(method):
+                if "while True:" in inspect.getsource(method):
+                    log.debug(f"Method {method_name} is infinite loop - starting task")
+                    sig = inspect.signature(method)
+                    kwargs = {}
+                    self.fill_kwargs(sig.parameters, kwargs, self.nickname, self.nickname, invited_to)
+                    if "send" in sig.parameters:
+                        kwargs["send"] = self.message 
+                    event_loop = self.pool.eventloop
+                    self.tasks.append(event_loop.create_task(method(**kwargs)))
+
+    def clean_params(self, params):
         if "self" in params: params.remove("self")
         if "args" in params: params.remove("args")
         if "kwargs" in params: params.remove("kwargs")
@@ -259,10 +283,20 @@ class IRCExportBot(pydle.Client):
         if "assigned_user" in params: params.remove("assigned_user")
         if "target" in params: params.remove("target")
         if "source" in params: params.remove("source")
+        if "send" in params: params.remove("send")
+        return params
 
+
+    def instantiation_instructions(self):
+        """Return instructions for instantiating this bot's class."""
+        PREFACE = "This bot uses an object-oriented interface with a class that must be instantiated with additional arguments before use. See below for instructions on how to do so."
+        obj_cls = self.class_
+        sig = inspect.signature(obj_cls.__init__)
+        params = list(sig.parameters.keys())
         # we assume there are additional arguments as otherwise we would have been instantiated already
+        params = self.clean_params(params)
         assert len(params) > 0
-        params_str = ", ".join(params)
+        params_str = ", ".join([f"<{p}>" for p in params])
         init_docstring = inspect.getdoc(obj_cls.__init__)
         class_docstring = inspect.getdoc(obj_cls)
         if init_docstring is None: init_docstring = "Should be self-explanatory."
@@ -552,6 +586,9 @@ class IRCExportBot(pydle.Client):
                     self.pool.bot_instances.remove(self)
                     self.pool = None
                     self.remove_me()
+                    for task in self.tasks:
+                        if not task.cancelled():
+                            task.cancel()
                     return None
                 s_args = match[2]
                 if not self.check_reply_channel(func_name, reply_target):
@@ -586,10 +623,21 @@ class IRCExportBot(pydle.Client):
                         kwargs["source"] = source
                     if "invited_to" in sig.parameters:
                         kwargs["invited_to"] = self.joined_channels 
-                    if callable(func):
+
+                    if inspect.iscoroutinefunction(func):
+                        log.debug(f"Method {func_name} is coroutine")
+                        if "send" in sig.parameters:
+                            kwargs["send"] = self.message 
+                        log.debug(f"Method {func_name} is infinite loop - starting task")
+                        event_loop = self.pool.eventloop
+                        self.tasks.append(event_loop.create_task(func(**kwargs)))
+                    elif callable(func):
                         try:
                             result = func(*args, **kwargs)
                             if func_name == self.class_.__name__:
+                                if self.obj is not None:
+                                    log.debug("Already instantiated")
+                                    raise UsageError(f"You tried to instantiate an already instantiated class bot. Please use as described.")
                                 log.debug("Instantiated successfully")
                                 self.obj = result
                                 await self.join_supplemental_channels()
@@ -656,14 +704,20 @@ class IRCExportBot(pydle.Client):
             method = getattr(self.obj, method_name)
             if callable(method):
                 if channel is not None and not self.check_reply_channel(method_name, channel):
-                    log.debug(f"Skipping method {method_name} because it is not exported to channel {channel}")
+                    log.debug(f"DOC Skipping method {method_name} because it is not exported to channel {channel}")
+                    continue
+                if "while True:" in inspect.getsource(method):
+                    log.debug(f"DOC Skipping method {method_name} because it is infinite loop")
                     continue
                 log.debug("Found method: " + method_name)
                 method_docstring = method.__doc__ or "Should be self-explanatory"
                 # get method signature
                 method_signature = inspect.signature(method)
+                params = list(method_signature.parameters.keys())
+                params = self.clean_params(params)
+                params_string = ", ".join([f"<{p}>" for p in params])
                 chans_avail_list = ", ".join(self.func_chan_avail(method_name))
-                all_methods_docstrings.append(f"Method '{method_name}{method_signature} (available on channel(s): {chans_avail_list})': {method_docstring}")
+                all_methods_docstrings.append(f"Method '{method_name}{params_string} (available on channel(s): {chans_avail_list})': {method_docstring}")
 
         all_methods_docstrings.append(f"Method 'destroy()': Delete and unload this bot.")
         
@@ -716,6 +770,9 @@ def export(obj_or_class_or_method, server_address="irc.magic-r.com", server_port
         tls_verify (bool, optional): Use TLS cert verification or not. Defaults to False.
         base_path (str, optional): Base locally-attached filesystem path for bot instances binaries storage. Defaults to [current working directory]/nllink.data/[object's class name].
         full_storage_path (str, optional): If provided, will be used as a full path to locally-attached filesystem storage for all object instances without subdirectories. Defaults to base_path/[objects's class names].
+    
+    Notes:
+        If a method in class is defined as async, it will be started within internal async loop as a separate task, and "send" argument provided with a function to send messages to a channel or user with signature 'send(target, message)'. This can be useful for infinite loops.
 
     Returns:
         ClientPool, Tuple[List[bot_instances], thread]: ClientPool with eventloop, List of bot instances and a thread that runs the IRC event loop. 
@@ -780,7 +837,10 @@ def export(obj_or_class_or_method, server_address="irc.magic-r.com", server_port
         # extract elf name from file name in form of "elf00001.pickle"
         bot_name = file.split("/")[-1].split(".")[0]
         # extract elf id from file name using regex of numbers
-        bot_id = int(re.findall(r'\d+', bot_name)[0])
+        try:
+            bot_id = int(re.findall(r'\d+', bot_name)[0])
+        except IndexError:
+            continue
         # load elf state from file
         with open(file, 'rb') as f:
             client: IRCExportBot = pickle.load(f)
