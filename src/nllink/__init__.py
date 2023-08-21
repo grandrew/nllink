@@ -42,6 +42,9 @@ MAX_DEPTH = 5
 DEFAULT_CHANNEL = "#export_bots"
 
 
+AUTO_PARAMS = ("invited_to", "nickname", "realname", "assigned_user", "target", "source", "send")
+
+
 # monkeypatch pydle
 def __handle_forever(self):
     """ Main loop of the pool: handle clients forever, until the event loop is stopped. """
@@ -754,6 +757,23 @@ class IRCExportBot(pydle.Client):
             return self.invited_channels[:1]
 
 
+def check_defaults_func(func):
+    print("Checking defaults for function", func.__name__)
+    sig = inspect.signature(func)
+    params = list(sig.parameters.keys())
+    now_defaults = False
+    prev_par = None
+    for p in params:
+        if p not in AUTO_PARAMS and not now_defaults:
+            prev_par = p
+            continue
+        else:
+            now_defaults = True
+        if now_defaults and not p in AUTO_PARAMS:
+            raise TypeError(f"Parameter {p} is not allowed in current position in the function {func.__name__} because it follows {prev_par} which is a special parameter name within kwarg parameter names {AUTO_PARAMS} that are automatically filled in by calling bot machinery and should only follow after all non-auto parameters.")
+        prev_par = p
+
+
 # TODO: object-oriented interface to have more control over the export runtimes
 def export(obj_or_class_or_method, server_address="irc.magic-r.com", server_port=3389, channel=DEFAULT_CHANNEL, channel_suffix="", nickname_base=None, use_tls=False, tls_verify=False, base_path=None, full_storage_path=None, blocking=True):
     # TODO: bot can only join one main channel, subsequent invites must fail
@@ -800,12 +820,20 @@ def export(obj_or_class_or_method, server_address="irc.magic-r.com", server_port
         cls = obj_or_class_or_method
         cls_name = obj_or_class_or_method.__name__
         method  = None
+        check_defaults_func(cls.__init__)
+        for method_name in dir(cls):
+            if method_name.startswith("_"):
+                continue
+            method = getattr(cls, method_name)
+            if callable(method) and not isinstance(method, type):
+                check_defaults_func(method)
     elif callable(obj_or_class_or_method) and not isinstance(obj_or_class_or_method, type):
         # this is class un-bound method, need to extract class that this method belongs to
         # since it doesn't have __self__ yet, we use different method:
         cls = inspect._findclass(obj_or_class_or_method)
         cls_name = cls.__name__
         method = obj_or_class_or_method
+        check_defaults_func(method)
     elif isinstance(obj_or_class_or_method, object):
         cls = obj_or_class_or_method.__class__
         cls_name = cls.__name__
