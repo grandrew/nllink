@@ -661,11 +661,15 @@ class IRCExportBot(pydle.Client):
                                         return f"TO:{reply_target} {result}"
                                     except Exception as e:
                                         log.error(f"{self.nickname} >>> ERROR IN THINK - REPLY SERIALIZATION ERROR target={reply_target} message={message} func_name={func_name} args={args} exception={e}")
+                                        import traceback
+                                        traceback.print_exc()
                                         return f"TO:{reply_target} REPLY SERIALIZATION ERROR: {e}"
                         except UsageError as e:
                             raise e
                         except Exception as e:
                             log.error(f"{self.nickname} >>> ERROR IN THINK - CALL ERROR target={reply_target} message={message} func_name={func_name} args={args} exception={e}")
+                            import traceback
+                            traceback.print_exc()
                             return f"TO:{reply_target} CALL ERROR: {e}"
                     else:
                         log.error(f"ERROR IN THINK - NOT CALLABLE: {func_name} - {func}")
@@ -758,7 +762,6 @@ class IRCExportBot(pydle.Client):
 
 
 def check_defaults_func(func):
-    print("Checking defaults for function", func.__name__)
     sig = inspect.signature(func)
     params = list(sig.parameters.keys())
     now_defaults = False
@@ -775,7 +778,7 @@ def check_defaults_func(func):
 
 
 # TODO: object-oriented interface to have more control over the export runtimes
-def export(obj_or_class_or_method, server_address="irc.magic-r.com", server_port=3389, channel=DEFAULT_CHANNEL, channel_suffix="", nickname_base=None, use_tls=False, tls_verify=False, base_path=None, full_storage_path=None, blocking=True):
+def export(obj_or_class_or_method, server_address="irc.magic-r.com", server_port=3389, channel=DEFAULT_CHANNEL, channel_suffix="", nickname_base=None, use_tls=False, tls_verify=False, base_path="./nllink.data", full_storage_path=None, blocking=True):
     # TODO: bot can only join one main channel, subsequent invites must fail
     """Superfunction to export a Python class to IRC as a bot in Magic-R natural language format.
 
@@ -850,7 +853,6 @@ def export(obj_or_class_or_method, server_address="irc.magic-r.com", server_port
             cls._export_metadata[obj_or_class_or_method.__name__]["channel_suffix"].append(channel_suffix)
         return
 
-    base_path = base_path or f"./nllink.data"
     full_path = full_storage_path or str(os.path.join(base_path, cls_name))
     Path(full_path).mkdir(parents=True, exist_ok=True)
     bot_instances = []
