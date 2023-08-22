@@ -901,4 +901,5 @@ def export(obj_or_class_or_method, server_address="irc.magic-r.com", server_port
         pool.handle_forever()
     else:
         thread = threading.Thread(target=pool.handle_forever)
+        thread.start()
     return pool, bot_instances, thread
