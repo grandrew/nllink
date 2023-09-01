@@ -14,7 +14,7 @@ class Timer:
         while True:
             await asyncio.sleep(self.minutes)
             if send:
-                await send(self.channel, "Time has passed: {} minutes".format(self.minutes))
+                await send("Time has passed: {} minutes".format(self.minutes), channel=self.channel)
 
 if __name__ == '__main__':
     export(Timer, channel="test_timer")

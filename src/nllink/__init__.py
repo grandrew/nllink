@@ -270,7 +270,22 @@ class IRCExportBot(pydle.Client):
                     kwargs = {}
                     self.fill_kwargs(sig.parameters, kwargs, self.nickname, self.nickname, invited_to)
                     if "send" in sig.parameters:
-                        kwargs["send"] = self.message 
+                        local_method_name = method_name
+                        def sendfunc(message, channel=None):
+                            if channel is None: 
+                                # check if we have a dedicated metadata channel
+                                print(local_method_name, self.class_._export_metadata)
+                                if local_method_name in self.class_._export_metadata and "channel" in self.class_._export_metadata[local_method_name]:
+                                    channel = self.class_._export_metadata[local_method_name]["channel"][0]
+                                    # TODO: support multiple channels
+                                # now check channel suffix
+                                if local_method_name in self.class_._export_metadata and "channel_suffix" in self.class_._export_metadata[local_method_name]:
+                                    if channel is None: channel = self.invited_channels[0]
+                                    channel = channel + self.class_._export_metadata[local_method_name]["channel_suffix"][0] 
+                                if channel is None:
+                                    channel = self.invited_channels[0]
+                            return self.message(channel, message)
+                        kwargs["send"] = sendfunc
                     event_loop = self.pool.eventloop
                     self.tasks.append(event_loop.create_task(method(**kwargs)))
 
@@ -742,7 +757,7 @@ class IRCExportBot(pydle.Client):
     
     def list_exported_channels(self, method_name):
         if method_name in self.class_._export_metadata:
-            chans_base = self.class_._export_metadata[method_name]["channels"]
+            chans_base = self.class_._export_metadata[method_name]["channel"]
             if len(self.joined_channels) > 0:
                 chans_sup = [self.invited_channels[0] + x for x in self.class_._export_metadata[method_name]["channel_suffix"]]
             log.debug(f"Listing exported channels for method {method_name}: {chans_base + chans_sup}")
@@ -753,7 +768,7 @@ class IRCExportBot(pydle.Client):
     def func_chan_avail(self, func_name):
         """Return the list of channels where the function is available."""
         if func_name in self.class_._export_metadata:
-            chans_base = self.class_._export_metadata[func_name]["channels"]
+            chans_base = self.class_._export_metadata[func_name]["channel"]
             if len(self.joined_channels) > 0:
                 chans_sup = [self.invited_channels[0] + x for x in self.class_._export_metadata[func_name]["channel_suffix"]]
             return chans_base + chans_sup
@@ -778,7 +793,7 @@ def check_defaults_func(func):
 
 
 # TODO: object-oriented interface to have more control over the export runtimes
-def export(obj_or_class_or_method, server_address="irc.magic-r.com", server_port=3389, channel=DEFAULT_CHANNEL, channel_suffix="", nickname_base=None, use_tls=False, tls_verify=False, base_path="./nllink.data", full_storage_path=None, blocking=True):
+def export(obj_or_class_or_method, server_address="irc.magic-r.com", server_port=3389, channel=DEFAULT_CHANNEL, channel_suffix="", nickname_base=None, use_tls=False, tls_verify=False, base_path="./nllink.data", full_storage_path=None, blocking=None):
     # TODO: bot can only join one main channel, subsequent invites must fail
     """Superfunction to export a Python class to IRC as a bot in Magic-R natural language format.
 
