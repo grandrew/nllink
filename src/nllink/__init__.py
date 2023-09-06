@@ -320,8 +320,24 @@ class IRCExportBot(pydle.Client):
         if init_docstring is None: init_docstring = "Should be self-explanatory."
         if class_docstring is None: class_docstring = "Should be self-explanatory."
         class_name = obj_cls.__name__
-
-        full_instructions = f"{PREFACE}\n\n#{class_name}\n{class_docstring}\n Instantiation Documentation:\n\n{init_docstring}\n\nTo instantiate, issue the required infomration with a message exactly in the following format: '{class_name}({params_str})'"
+        all_methods_summaries = []
+        for method_name in dir(self.class_):
+            if method_name.startswith("_"):
+                continue
+            method = getattr(self.class_, method_name)
+            if callable(method):
+                method_signature = inspect.signature(method)
+                params = list(method_signature.parameters.keys())
+                params = self.clean_params(params)
+                params_string = ", ".join([f"<{p}>" for p in params])
+                chans_avail_list = ", ".join(self.func_chan_avail(method_name))
+                all_methods_summaries.append(f"Method '{method_name}({params_string}) [available after instantiation on channel(s): {chans_avail_list}]'")
+        methods_summary = "\n".join(all_methods_summaries) 
+        if all_methods_summaries:
+            methods_doc = f"\n\nAfter instantiation, the following methods will become available:\n {methods_summary}"
+        else:
+            methods_doc = ""
+        full_instructions = f"{PREFACE}\n\n#{class_name}\n{class_docstring}\n Instantiation Documentation:\n\n{init_docstring}{methods_doc}\n\nTo instantiate, issue the required infomration with a message exactly in the following format: '{class_name}({params_str})'"
         return full_instructions
 
     async def on_invite(self, channel, by):
@@ -739,7 +755,7 @@ class IRCExportBot(pydle.Client):
                 params = self.clean_params(params)
                 params_string = ", ".join([f"<{p}>" for p in params])
                 chans_avail_list = ", ".join(self.func_chan_avail(method_name))
-                all_methods_docstrings.append(f"Method '{method_name}{params_string} (available on channel(s): {chans_avail_list})': {method_docstring}")
+                all_methods_docstrings.append(f"Method '{method_name}({params_string}) [available on channel(s): {chans_avail_list}]': {method_docstring}")
 
         all_methods_docstrings.append(f"Method 'destroy()': Delete and unload this bot.")
         
