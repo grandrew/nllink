@@ -304,7 +304,6 @@ class IRCExportBot(pydle.Client):
         if "send" in params: params.remove("send")
         return params
 
-
     def instantiation_instructions(self):
         """Return instructions for instantiating this bot's class."""
         PREFACE = "This bot uses an object-oriented interface with a class that must be instantiated with additional arguments before use. See below for instructions on how to do so."
@@ -332,9 +331,9 @@ class IRCExportBot(pydle.Client):
                 params_string = ", ".join([f"<{p}>" for p in params])
                 chans_avail_list = ", ".join(self.func_chan_avail(method_name))
                 all_methods_summaries.append(f"Method '{method_name}({params_string}) [available after instantiation on channel(s): {chans_avail_list}]'")
-        methods_summary = "\n".join(all_methods_summaries) 
+        methods_summary = "\n    ".join(all_methods_summaries) 
         if all_methods_summaries:
-            methods_doc = f"\n\nAfter instantiation, the following methods will become available:\n {methods_summary}"
+            methods_doc = f"\n\nAfter instantiation, the following methods will become available:\n{methods_summary}"
         else:
             methods_doc = ""
         full_instructions = f"{PREFACE}\n\n#{class_name}\n{class_docstring}\n Instantiation Documentation:\n\n{init_docstring}{methods_doc}\n\nTo instantiate, issue the required infomration with a message exactly in the following format: '{class_name}({params_str})'"
