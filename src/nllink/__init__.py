@@ -330,7 +330,8 @@ class IRCExportBot(pydle.Client):
                 params = self.clean_params(params)
                 params_string = ", ".join([f"<{p}>" for p in params])
                 chans_avail_list = ", ".join(self.func_chan_avail(method_name))
-                all_methods_summaries.append(f"Method '{method_name}({params_string}) [available after instantiation on channel(s): {chans_avail_list}]'")
+                method_docstring = method.__doc__ or "Should be self-explanatory"
+                all_methods_summaries.append(f"Method '{method_name}({params_string}) [available after instantiation on channel(s): {chans_avail_list}]':\n{method_docstring}")
         methods_summary = "\n    ".join(all_methods_summaries) 
         if all_methods_summaries:
             methods_doc = f"\n\nAfter instantiation, the following methods will become available:\n{methods_summary}"
