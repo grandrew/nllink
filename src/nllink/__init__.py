@@ -38,7 +38,7 @@ import pydle
 
 
 NAME_DIGITS = 5
-MAX_DEPTH = 5
+MAX_DEPTH = 10
 DEFAULT_CHANNEL = "#export_bots"
 
 
