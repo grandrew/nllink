@@ -74,12 +74,20 @@ async def __connect(self):
     
     asyncio.set_event_loop(self.eventloop)
 
-    (self.reader, self.writer) = await asyncio.open_connection(
-        host=self.hostname,
-        port=self.port,
-        local_addr=self.source_address,
-        ssl=self.tls_context
-    )
+    for i in range(30):
+        try:
+            (self.reader, self.writer) = await asyncio.open_connection(
+                host=self.hostname,
+                port=self.port,
+                local_addr=self.source_address,
+                ssl=self.tls_context
+            )
+            break
+        except Exception as e:
+            local_exception = e
+    else:
+        raise local_exception
+
 pydle.connection.Connection.connect = __connect
 
 
