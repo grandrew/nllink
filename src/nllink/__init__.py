@@ -91,6 +91,26 @@ async def __connect(self):
 pydle.connection.Connection.connect = __connect
 
 
+def requires_multibyte_encoding(s):
+    for char in s:
+        if ord(char) > 0x7F:
+            return True
+    return False
+
+
+def chunkify(message, chunksize):
+    if requires_multibyte_encoding(message):
+        chunksize = chunksize // 2
+    if not message:
+        yield message
+    else:
+        while message:
+            chunk = message[:chunksize]
+            message = message[chunksize:]
+            yield chunk
+pydle.features.rfc1459.client.chunkify = chunkify
+
+
 class UsageError(Exception):
     """Raised when function call fails due to incorrect usage."""
     pass
