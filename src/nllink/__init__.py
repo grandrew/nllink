@@ -74,7 +74,7 @@ async def __connect(self):
     
     asyncio.set_event_loop(self.eventloop)
 
-    for i in range(30):
+    for i in range(300):
         try:
             (self.reader, self.writer) = await asyncio.open_connection(
                 host=self.hostname,
@@ -84,6 +84,7 @@ async def __connect(self):
             )
             break
         except Exception as e:
+            time.sleep(5)
             local_exception = e
     else:
         raise local_exception
