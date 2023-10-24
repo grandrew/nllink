@@ -315,6 +315,8 @@ class IRCExportBot(pydle.Client):
                                     channel = self.invited_channels[0]
                             return self.message(channel, message)
                         kwargs["send"] = sendfunc
+                    if "_irc_instance" in sig.parameters:
+                        kwargs["_irc_instance"] = self
                     event_loop = self.pool.eventloop
                     self.tasks.append(event_loop.create_task(method(**kwargs)))
 
@@ -331,6 +333,7 @@ class IRCExportBot(pydle.Client):
         if "target" in params: params.remove("target")
         if "source" in params: params.remove("source")
         if "send" in params: params.remove("send")
+        if "_irc_instance" in params: params.remove("_irc_instance")
         return params
 
     def instantiation_instructions(self):
@@ -691,6 +694,8 @@ class IRCExportBot(pydle.Client):
                         log.debug(f"Method {func_name} is coroutine")
                         if "send" in sig.parameters:
                             kwargs["send"] = self.message 
+                        if "_irc_instance" in sig.parameters:
+                            kwargs["_irc_instance"] = self
                         log.debug(f"Method {func_name} is infinite loop - starting task")
                         event_loop = self.pool.eventloop
                         self.tasks.append(event_loop.create_task(func(**kwargs)))
