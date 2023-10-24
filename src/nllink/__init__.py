@@ -300,7 +300,7 @@ class IRCExportBot(pydle.Client):
                     self.fill_kwargs(sig.parameters, kwargs, self.nickname, self.nickname, invited_to)
                     if "send" in sig.parameters:
                         local_method_name = method_name
-                        def sendfunc(message, channel=None):
+                        async def sendfunc(message, channel=None):
                             if channel is None: 
                                 # check if we have a dedicated metadata channel
                                 print(local_method_name, self.class_._export_metadata)
@@ -313,7 +313,7 @@ class IRCExportBot(pydle.Client):
                                     channel = channel + self.class_._export_metadata[local_method_name]["channel_suffix"][0] 
                                 if channel is None:
                                     channel = self.invited_channels[0]
-                            return self.message(channel, message)
+                            return await self.message(channel, message)
                         kwargs["send"] = sendfunc
                     if "_irc_instance" in sig.parameters:
                         kwargs["_irc_instance"] = self
@@ -949,11 +949,19 @@ def export(obj_or_class_or_method, server_address="irc.magic-r.com", server_port
     pool = pydle.ClientPool()
 
     # now create additional free zoo
-    for _ in range(max_bot_id + 1, max_bot_id + 1 + 10):
-        _ = str(_).zfill(5)
-        new_bot_name = f"{nickname_base}{_}"
-        new_bot_real_name = f"{cls_name} {_}"
+    if method:
+        for _ in range(max_bot_id + 1, max_bot_id + 1 + 10):
+            _ = str(_).zfill(5)
+            new_bot_name = f"{nickname_base}{_}"
+            new_bot_real_name = f"{cls_name} {_}"
+            bot_new_client = IRCExportBot(new_bot_name, obj=obj_or_class_or_method, chan_free=channel, realname=new_bot_real_name)
+            bot_instances.append(bot_new_client)
+    else:
+        # this is a singleton instance
+        new_bot_name = f"{nickname_base}"
+        new_bot_real_name = f"{cls_name}"
         bot_new_client = IRCExportBot(new_bot_name, obj=obj_or_class_or_method, chan_free=channel, realname=new_bot_real_name)
+        bot_new_client.joined_channels = [channel]
         bot_instances.append(bot_new_client)
 
     bot: IRCExportBot
