@@ -40,6 +40,7 @@ import pydle
 NAME_DIGITS = 5
 MAX_DEPTH = 10
 DEFAULT_CHANNEL = "#export_bots"
+NOT_MY_SANTA_MSG = "I am not your direct assistant and I'm not explicitly allowed to talk to you! Please try again and send your message to the relevant channel instead."
 
 
 AUTO_PARAMS = ("invited_to", "nickname", "realname", "assigned_user", "target", "source", "send")
@@ -161,10 +162,13 @@ class IRCExportBot(pydle.Client):
         self.real_name = self.nickname
         self.real_name_temp = self.nickname
         self.tasks = []
+        self.last_message = None
+        self.last_message_time = time.time()
 
     async def on_connect(self):
         self.RECONNECT_MAX_ATTEMPTS = None
         self.RECONNECT_DELAYED = False
+        print(f"{repr(self)}({id(self)}) connected!")
         log.debug(f"{self.nickname} Current channels: {self.joined_channels}")
         if len(self.joined_channels) == 0 and self.assigned_user is None:
             log.debug(f"{self.nickname} Joining free channel {self.chan_free}")
@@ -175,6 +179,9 @@ class IRCExportBot(pydle.Client):
             if self.obj is not None and len(self.joined_channels) > 0:
                 # restore any infinite loops
                 await self.join_supplemental_channels()
+        if hasattr(self.class_, "_singleton_password") and self.class_._singleton_password is not None:
+            print(f"Password found of length {len(self.class_._singleton_password)}, identifying")
+            await self.message("nickserv", f"identify {self.class_._singleton_password}")
     
     def __getstate__(self):
         return [None, self.assigned_user, None, None, self.joined_channels, self.nickname, self.log_lines, self.realname, self.chan_free, self.obj, self.class_, self.invited_channels]
@@ -236,6 +243,8 @@ class IRCExportBot(pydle.Client):
 
     async def try_instantiate(self, reply_target, source, invited_to):
         obj_cls = self.class_  
+        if obj_cls._singleton:
+            return False
         sig = inspect.signature(obj_cls.__init__)
         kwargs = {}
         if "nickname" in sig.parameters:
@@ -374,7 +383,7 @@ class IRCExportBot(pydle.Client):
 
     async def on_invite(self, channel, by):
         if self.assigned_user is not None and by != self.assigned_user:
-            await self.message(by, f"You are not my Santa!")
+            await self.message(by, NOT_MY_SANTA_MSG)
             try:
                 await self.part(self.chan_free, "Hooray! I was chosen!")
                 self.replace_free_self_if_needed()
@@ -402,10 +411,17 @@ class IRCExportBot(pydle.Client):
 
     async def on_message(self, target, source, message):
         # don't respond to our own messages, as this leads to a positive feedback loop
+        if message == self.last_message and time.time() - self.last_message_time < 0.1:
+            log.debug(f"{self.nickname} Ignoring duplicate message spamming: {message} from {source} to {target}")
+            print(f"{self.nickname} Ignoring duplicate message spamming: {message} from {source} to {target}")
+            return
+        self.last_message = message
+        self.last_message_time = time.time()
         if source == self.nickname:
             log.debug(f"{self.nickname} Ignoring message from myself")
             return
         log.debug(f"{self.nickname} >>> INCOMING RAW target={target} source={source} me={self.nickname} assigned={self.assigned_user} message={message}")
+        print(f"Message from {source} to {target} (me={self.nickname}, assigned={self.assigned_user}): {message}")
         if target == self.chan_free:
             log.debug(f"{self.nickname} Ignoring message from #free_*")
             return
@@ -421,10 +437,13 @@ class IRCExportBot(pydle.Client):
         else:
             is_dm = False
         
+        if self.class_._deaf:
+            log.debug(f"{self.nickname} Ignoring message because deaf")
+            return
         # TODO HERE: user control??
         if is_dm and self.assigned_user != source:
-            if "You are not my Santa" not in message:
-                await self.message(source, f"You are not my Santa!")
+            if NOT_MY_SANTA_MSG not in message:
+                await self.message(source, NOT_MY_SANTA_MSG)
                 try:
                     await self.part(self.chan_free, "Hooray! I was chosen!")
                     self.replace_free_self_if_needed()
@@ -843,7 +862,7 @@ def check_defaults_func(func):
 
 
 # TODO: object-oriented interface to have more control over the export runtimes
-def export(obj_or_class_or_method, server_address="irc.magic-r.com", server_port=3389, channel=DEFAULT_CHANNEL, channel_suffix="", nickname_base=None, use_tls=False, tls_verify=False, base_path="./nllink.data", full_storage_path=None, blocking=None):
+def export(obj_or_class_or_method, server_address="irc.magic-r.com", server_port=3389, channel=DEFAULT_CHANNEL, channel_suffix="", nickname_base=None, use_tls=False, tls_verify=False, base_path="./nllink.data", full_storage_path=None, blocking=None, singleton_password=None, deaf=False):
     # TODO: bot can only join one main channel, subsequent invites must fail
     """Superfunction to export a Python class to IRC as a bot in Magic-R natural language format.
 
@@ -895,6 +914,8 @@ def export(obj_or_class_or_method, server_address="irc.magic-r.com", server_port
             method = getattr(cls, method_name)
             if callable(method) and not isinstance(method, type):
                 check_defaults_func(method)
+        # TODO: method takes value here if class defines methods
+        #       if it does not, the behavior is singleton-like, check if it's ok
     elif callable(obj_or_class_or_method) and not isinstance(obj_or_class_or_method, type):
         # this is class un-bound method, need to extract class that this method belongs to
         # since it doesn't have __self__ yet, we use different method:
@@ -909,6 +930,12 @@ def export(obj_or_class_or_method, server_address="irc.magic-r.com", server_port
 
     if not hasattr(cls, "_export_metadata"):
         cls._export_metadata = defaultdict(lambda: defaultdict(list))
+        cls._singleton_password = singleton_password
+        cls._deaf = deaf
+        if method:
+            cls._singleton = False
+        else:
+            cls._singleton = True
 
     if callable(obj_or_class_or_method) and not isinstance(obj_or_class_or_method, type):
         # just set the metadata and return (if blocking=False) - TODO: this is the only supported mode as of yet
@@ -927,24 +954,27 @@ def export(obj_or_class_or_method, server_address="irc.magic-r.com", server_port
 
     free_count = 0
     # iterate over files in data directory with "*.pickle" pattern
-    log.debug(f"Looking for bot instances in {full_path}")
-    for file in glob.glob(os.path.join(full_path, "*.pickle")):
-        # extract elf name from file name in form of "elf00001.pickle"
-        bot_name = file.split("/")[-1].split(".")[0]
-        # extract elf id from file name using regex of numbers
-        try:
-            bot_id = int(re.findall(r'\d+', bot_name)[0])
-        except IndexError:
-            continue
-        # load elf state from file
-        with open(file, 'rb') as f:
-            client: IRCExportBot = pickle.load(f)
-            # check if elf is active
-            bot_instances.append(client)
-        max_bot_id = max(max_bot_id, bot_id)
-        if client.assigned_user is None:
-            free_count += 1
-    log.info(f"Found {len(bot_instances)} bot instances in storage, {free_count} of them are free")
+    if method:
+        log.debug(f"Looking for bot instances in {full_path}")
+        for file in glob.glob(os.path.join(full_path, "*.pickle")):
+            # extract elf name from file name in form of "elf00001.pickle"
+            bot_name = file.split("/")[-1].split(".")[0]
+            # extract elf id from file name using regex of numbers
+            try:
+                bot_id = int(re.findall(r'\d+', bot_name)[0])
+            except IndexError:
+                continue
+            # load elf state from file
+            with open(file, 'rb') as f:
+                client: IRCExportBot = pickle.load(f)
+                # check if elf is active
+                bot_instances.append(client)
+            max_bot_id = max(max_bot_id, bot_id)
+            if client.assigned_user is None:
+                free_count += 1
+        log.info(f"Found {len(bot_instances)} bot instances in storage, {free_count} of them are free")
+    else:
+        log.debug(f"Singleton bot instance")
 
     pool = pydle.ClientPool()
 
