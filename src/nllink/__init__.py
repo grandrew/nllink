@@ -992,6 +992,7 @@ def export(obj_or_class_or_method, server_address="irc.magic-r.com", server_port
         new_bot_real_name = f"{cls_name}"
         bot_new_client = IRCExportBot(new_bot_name, obj=obj_or_class_or_method, chan_free=channel, realname=new_bot_real_name)
         bot_new_client.joined_channels = [channel]
+        bot_new_client.assigned_user = "self"
         bot_instances.append(bot_new_client)
 
     bot: IRCExportBot
